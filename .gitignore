@@ -47,3 +47,8 @@
 *.clang_complete
 *.gcc-flags.json
 .pio/build/esp32dev/.sconsign311.dblite
+
+wifi_config.h
+.pio/build/esp32dev/firmware.bin
+.pio/build/esp32dev/firmware.elf
+.pio/build/esp32dev/firmware.map

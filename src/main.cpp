@@ -1,6 +1,7 @@
 #include <SPI.h>
 #include <TFT_eSPI.h> // Graphics and font library for ST7735 driver chip
 #include <XPT2046_Touchscreen.h> // Touch screen library
+#include <WiFi.h>
 
 TFT_eSPI tft = TFT_eSPI();
 
@@ -20,6 +21,8 @@ XPT2046_Touchscreen touchscreen(XPT2046_CS, XPT2046_IRQ);
 
 // Touchscreen coordinates: (x, y) and pressure (z)
 int x, y, z;
+
+const char* ssid = "UCM Guest";
 
 // Print Touchscreen info about X, Y and Pressure (Z) on the Serial Monitor
 void printTouchToSerial(int touchX, int touchY, int touchZ) {
@@ -53,6 +56,8 @@ void printTouchToDisplay(int touchX, int touchY, int touchZ) {
   tft.drawCentreString(tempText, centerX, textY, FONT_SIZE);
 }
 
+
+
 void setup() {
   Serial.begin(115200);
 
@@ -78,6 +83,34 @@ void setup() {
 
   tft.drawCentreString("Hello, world!", centerX, 30, FONT_SIZE);
   tft.drawCentreString("Touch screen to test", centerX, centerY, FONT_SIZE);
+
+  WiFi.mode(WIFI_STA);
+  WiFi.begin(ssid);  // No password parameter
+  
+  Serial.print("Connecting");
+  int timeout = 0;
+  while (WiFi.status() != WL_CONNECTED && timeout < 20) {
+    delay(500);
+    Serial.print(".");
+    timeout++;
+  }
+  
+  Serial.println();
+  
+  if (WiFi.status() == WL_CONNECTED) {
+    Serial.println("✓ Connected!");
+    Serial.print("IP Address: ");
+    Serial.println(WiFi.localIP());
+    Serial.print("MAC Address: ");
+    Serial.println(WiFi.macAddress());
+    Serial.print("Signal Strength (RSSI): ");
+    Serial.print(WiFi.RSSI());
+    Serial.println(" dBm");
+  } else {
+    Serial.println("✗ Failed to connect");
+    Serial.print("Status: ");
+    Serial.println(WiFi.status());
+  }
 }
 
 void loop() {
@@ -92,6 +125,8 @@ void loop() {
 
     printTouchToSerial(x, y, z);
     printTouchToDisplay(x, y, z);
+
+    tft.drawCentreString("Test", x,y, FONT_SIZE);
 
     delay(100);
   }
