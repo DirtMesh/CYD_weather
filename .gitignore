@@ -39,3 +39,10 @@
 
 # debug information files
 *.dwo
+
+#platformIO?
+*.pio
+*.pioenvs
+*.piolibdeps
+*.clang_complete
+*.gcc-flags.json
