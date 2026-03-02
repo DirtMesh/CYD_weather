@@ -46,3 +46,4 @@
 *.piolibdeps
 *.clang_complete
 *.gcc-flags.json
+.pio/build/esp32dev/.sconsign311.dblite
