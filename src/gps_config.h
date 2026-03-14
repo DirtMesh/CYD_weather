@@ -3,9 +3,9 @@
 
 // GPS coordinates for Open-Meteo weather API
 // Get your coordinates at: https://nominatim.openstreetmap.org/
-const float GPS_LATITUDE = 37.324;   // Change to your latitude
-const float GPS_LONGITUDE = -120.462; // Change to your longitude
-const char* LOCATION_NAME = "Merced"; // Change to your location name
-const char* TIMEZONE_STR = "PST8PDT,M3.2.0/2,M11.1.0/2";  
+#define GPS_LATITUDE   37.324f
+#define GPS_LONGITUDE  -120.462f
+#define LOCATION_NAME  "Merced"
+#define TIMEZONE_STR   "PST8PDT,M3.2.0/2,M11.1.0/2"
 
 #endif

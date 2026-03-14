@@ -8,16 +8,16 @@
 #include <time.h>
 #include <sys/time.h>
 #include <math.h>
+#include "display.h" // Display functions
 
 
 // Function declarations
 void connectToWiFi();
-void showSplashScreen();
-void displayWeather();
-void updateBlinkIndicator(bool blinkState);
-void showErrorScreen();
-void fetchWeather();
+void fetchCurrentWeather();
+void fetchDailyForecast();
 bool syncTime(uint32_t timeout_ms);
+void renderScreen(int screen);
+bool ensureWiFi();
 
 TFT_eSPI tft = TFT_eSPI();
 
@@ -33,22 +33,29 @@ XPT2046_Touchscreen touchscreen(XPT2046_CS, XPT2046_IRQ);
 
 #define SCREEN_WIDTH 320
 #define SCREEN_HEIGHT 240
-#define FONT_SIZE 2
 
 // Touchscreen coordinates: (x, y) and pressure (z)
 int x, y, z;
 int centerX, centerY;
 
+int currentScreen = 0; // 0=Now, 1=days1-3, 2=days4-6, 3=7-9
+unsigned long lastTouchTime = 0;
+const unsigned long TOUCH_DEBOUNCE = 400; //ms
+
+
 // Weather API
 WeatherAPI* weatherAPI = nullptr;
 
 // Timing
-unsigned long lastWeatherUpdate = 0;
-const unsigned long WEATHER_UPDATE_INTERVAL = 5 * 60 * 1000; // 5 minutes
+unsigned long lastCurrentUpdate = 0;
+unsigned long lastDailyUpdate = 0;
+const unsigned long CURRENT_UPDATE_INTERVAL = 5 * 60 * 1000;
+const unsigned long DAILY_UPDATE_INTERVAL   = 60 * 60 * 1000;
 const unsigned long CLOCK_UPDATE_INTERVAL = 20 * 1000; // 20 seconds
 unsigned long lastBlink = 0;
 const unsigned long BLINK_INTERVAL = 500; // 500ms blink
 bool blinkState = false;
+bool everFetchedSuccessfully = false;
 
 // Current weather (Now page)
 CurrentConditions currentWeather = {
@@ -65,10 +72,8 @@ CurrentConditions currentWeather = {
   .fetchedAtUtc     = 0
 };
 
-// NTP Server settings
-const char* ntpServer = "pool.ntp.org";
-const long gmtOffset_sec = 0;                    // GMT offset in seconds (change this)
-const int daylightOffset_sec = 0;                // Daylight saving offset in seconds
+// Forecast
+DailyForecast dailyForecast;
 
 unsigned long lastClockTick = 0;
 char lastClockStr[6] = ""; // "HH:MM"
@@ -110,11 +115,6 @@ void connectToWiFi() {
   } else {
     WiFi.begin(WIFI_SSID);
   }
-  
-  int barWidth = 200;
-  int barHeight = 10;
-  int barX = (tft.width() - barWidth) / 2;
-  int barY = tft.height() - 40;
 
   int timeout = 0;
   while (WiFi.status() != WL_CONNECTED && timeout < 20) {
@@ -122,291 +122,116 @@ void connectToWiFi() {
     Serial.print(".");
     timeout++;
   }
-  
   Serial.println();
-  
+
   if (WiFi.status() == WL_CONNECTED) {
     Serial.println("✓ Connected!");
   } else {
-    Serial.println("✗ Failed to connect");
-    delay(3000);
+    Serial.println("✗ Failed to connect, will retry");
   }
 }
 
-void showSplashScreen() {
-  tft.fillScreen(TFT_BLACK);
+bool ensureWiFi() {
+  if (WiFi.status() == WL_CONNECTED) return true;
 
-  // ---- App bar ----
-  tft.fillRect(0, 0, tft.width(), 28, TFT_DARKGREY);
-  tft.drawLine(0, 27, tft.width(), 27, TFT_CYAN);
+  int attempt = 1;
+  unsigned long retryDelay = 5000;  // 5s first retry
 
-  tft.setTextColor(TFT_WHITE, TFT_DARKGREY);
-  tft.drawString("Weather Station", 8, 6, 2);
+  while (WiFi.status() != WL_CONNECTED) {
+    Serial.print("WiFi reconnect attempt ");
+    Serial.println(attempt);
 
-  // Status dot (feels alive)
-  tft.fillCircle(tft.width() - 14, 14, 4, TFT_GREEN);
-
-  // ---- Main content ----
-  tft.setTextColor(TFT_WHITE, TFT_BLACK);
-
-  // Big focal text
-  tft.drawCentreString("Monitoring", centerX, 70, 4);
-  tft.setTextColor(TFT_LIGHTGREY, TFT_BLACK);
-  tft.drawCentreString("Local Conditions", centerX, 110, 2);
-
-  // Location
-  tft.setTextColor(TFT_CYAN, TFT_BLACK);
-  tft.drawCentreString(LOCATION_NAME, centerX, 145, 2);
-
-  tft.setTextColor(TFT_LIGHTGREY, TFT_BLACK);
-  tft.drawCentreString("Starting...", centerX, 40, 1);
-}
-
-void fetchWeather() {
-  if (WiFi.status() != WL_CONNECTED) {
-    Serial.println("WiFi disconnected, skipping weather fetch");
-    return;
-  }
-  
-  Serial.println("Fetching weather...");
-  
-  currentWeather = weatherAPI->getCurrentWeather();
-  
-  if (currentWeather.isValid) {
-    Serial.println("Weather fetched successfully");
-    displayWeather();
-  } else {
-    Serial.println("Failed to fetch weather");
-    showErrorScreen();
-  }
-  
-}
-
-// Small helper to redraw just the clock in the app bar
-void drawClockInAppBar() {
-  char timeBuf[6] = "--:--";
-
-  time_t now = time(nullptr);
-  struct tm t;
-  bool haveTime = (now > 24 * 3600) && localtime_r(&now, &t);
-  if (haveTime) {
-    strftime(timeBuf, sizeof(timeBuf), "%H:%M", &t);
-  }
-
-  if (strcmp(timeBuf, lastClockStr) == 0) return;
-  strcpy(lastClockStr, timeBuf);
-
-  const uint16_t APPBAR = 0x039F; // Teal-ish color for app bar background
-
-  // Clear just the clock region
-  int clockW = 60;
-  int clockH = 18;
-  int clockBuff = 30;
-  int clockX = tft.width() - clockBuff - clockW;
-  int clockY = 5;
-  tft.fillRect(clockX, clockY, clockW, clockH, APPBAR);
-
-  // Draw the new time
-  tft.setTextColor(TFT_WHITE, APPBAR);
-  int textX = tft.width() - clockBuff - tft.textWidth(timeBuf, 2);
-  tft.drawString(timeBuf, textX, 6, 2);
-}
-
-String windDirShort(int deg) {
-  // Normalize 0..359
-  while (deg < 0) deg += 360;
-  deg %= 360;
-
-  // 8-point compass
-  const char* dirs[] = {"N","NE","E","SE","S","SW","W","NW"};
-  int idx = (deg + 22) / 45;
-  idx = idx % 8;
-  return String(dirs[idx]);
-}
-
-void drawSunIcon(int x, int y, int r, uint16_t color, uint16_t bg) {
-  // Simple sun: circle + 8 rays
-  tft.fillCircle(x, y, r, color);
-  for (int i = 0; i < 8; i++) {
-    float a = (3.1415926f * 2.0f * i) / 8.0f;
-    int x1 = x + (int)((r + 2) * cos(a));
-    int y1 = y + (int)((r + 2) * sin(a));
-    int x2 = x + (int)((r + 7) * cos(a));
-    int y2 = y + (int)((r + 7) * sin(a));
-    tft.drawLine(x1, y1, x2, y2, color);
-  }
-}
-
-void drawMoonIcon(int x, int y, int r, uint16_t color, uint16_t bg) {
-  // Crescent: big circle minus offset circle filled with bg
-  tft.fillCircle(x, y, r, color);
-  tft.fillCircle(x + r / 2, y - r / 3, r, bg);
-}
-
-void displayWeather() {
-  // ---- Modern palette (brighter, consumer) ----
-  const uint16_t BG        = 0xF7BE;   // very light blue-grey background
-  const uint16_t HEADER1   = 0x039F;   // teal-ish
-  const uint16_t HEADER2   = 0x01F3;   // slightly darker teal band
-  const uint16_t CARD      = TFT_WHITE;
-  const uint16_t BORDER    = 0xD69A;   // light border
-  const uint16_t TEXT_DARK = 0x18E3;   // near-black, softer than pure black
-  const uint16_t TEXT_MUTE = 0x6B4D;   // muted grey
-  const uint16_t ACCENT    = 0xFD20;   // warm accent (orange) for highlights
-
-  tft.fillScreen(BG);
-
-  // ---- Header (two-band "gradient") ----
-  tft.fillRect(0, 0, tft.width(), 30, HEADER1);
-  tft.fillRect(0, 30, tft.width(), 4, HEADER2);
-
-  // Day/Night icon next to location
-  int iconX = 16;
-  int iconY = 17;
-  if (currentWeather.isDay) {
-    drawSunIcon(iconX, iconY, 6, TFT_YELLOW, HEADER1);
-  } else {
-    drawMoonIcon(iconX, iconY, 6, TFT_WHITE, HEADER1);
-  }
-
-  // Location text (shifted right to make room for icon)
-  tft.setTextColor(TFT_WHITE, HEADER1);
-  tft.drawString(LOCATION_NAME, 30, 8, 2);
-
-  // Clock
-  drawClockInAppBar();
-
-  // ---- Layout ----
-  const int pad = 5;
-  const int r   = 12;
-  const int yTop = 40;
-
-  // ---- Card 1: Primary conditions ----
-  int c1x = pad;
-  int c1y = yTop;
-  int c1w = tft.width() - 2 * pad;
-  int c1h = 98;
-
-  tft.fillRoundRect(c1x, c1y, c1w, c1h, r, CARD);
-  tft.drawRoundRect(c1x, c1y, c1w, c1h, r, BORDER);
-
-  // Layout: reserve right column for wind
-  const int innerPad = 14;
-  const int gap = 10;
-  const int windColW = 120;
-
-  int leftX = c1x + innerPad;
-  int leftW = c1w - (innerPad * 1) - gap - windColW;
-
-  int windX = c1x + c1w - innerPad - windColW;
-  int windY = c1y + 14;
-
-  // Temperature string
-  String tempNum = String(currentWeather.temperatureF, 0);
-
-  // Draw temp
-  tft.setTextColor(TEXT_DARK, CARD);
-  // Big numeric
-  tft.drawString(tempNum, leftX, c1y + 16, 6);
-
-  // Medium unit
-  tft.drawString("F", leftX + tft.textWidth(tempNum, 6) + 2, c1y + 12, 4);
-
-  // Wind block (right column)
-  tft.setTextColor(TEXT_MUTE, CARD);
-  tft.drawString("WIND", windX, windY, 2);
-
-  tft.setTextColor(TEXT_DARK, CARD);
-  String windStr = String(currentWeather.windSpeedMph, 0) + " mph";
-  tft.drawString(windStr, windX, windY + 22, 4);
-
-  tft.setTextColor(TEXT_MUTE, CARD);
-  String dirStr = windDirShort(currentWeather.windDirDeg) + " " + String(currentWeather.windDirDeg) + " deg";
-  tft.drawString(dirStr, windX, windY + 58, 2);
-
-  // Condition line, keep it within left column
-  String cond = currentWeather.conditionText;
-  if (cond.length() > 24) cond = cond.substring(0, 24) + "...";
-  tft.setTextColor(TEXT_DARK, CARD);
-  tft.drawString(cond, leftX, c1y + c1h - 30, 4);
-
-
-  // ---- Card 2: Metrics ----
-  int c2x = pad;
-  int c2y = c1y + c1h + 5;
-  int c2w = c1w;
-  int c2h = 78;
-
-  tft.fillRoundRect(c2x, c2y, c2w, c2h, r, CARD);
-  tft.drawRoundRect(c2x, c2y, c2w, c2h, r, BORDER);
-
-  // Grid separators
-  tft.drawLine(c2x + c2w / 2, c2y + 10, c2x + c2w / 2, c2y + c2h - 10, BORDER);
-  tft.drawLine(c2x + 10, c2y + c2h / 2, c2x + c2w - 10, c2y + c2h / 2, BORDER);
-
-  // Bigger metric tile renderer: label font 2, value font 4
-  auto metricBig = [&](int x, int y, const char* label, const String& value) {
-    tft.setTextColor(TEXT_MUTE, CARD);
-    tft.drawString(label, x, y, 2);
-    tft.setTextColor(TEXT_DARK, CARD);
-    tft.drawString(value, x+45, y, 4);
-  };
-
-  int lx = c2x + 10;
-  int rx = c2x + c2w / 2 + 10;
-  int ty = c2y + 12;
-  int by = c2y + c2h / 2 + 8;
-
-  metricBig(lx, ty, "HUM", String(currentWeather.humidityPct, 0) + "%");
-  metricBig(rx, ty, "CLOUD",  String(currentWeather.cloudCoverPct == 0 ? "0" : String(currentWeather.cloudCoverPct)) + " %");
-  metricBig(lx, by, "RAIN",  String(currentWeather.precipInLastHour, 1) + " in");
-  metricBig(rx, by, "PRESS", String(currentWeather.pressureMsl, 0) );
-
-  // ---- Footer ----
-  tft.setTextColor(TEXT_MUTE, BG);
-
-  String footerText;
-
-  if (!currentWeather.isValid) {
-    footerText = "Weather unavailable";
-  } else if (currentWeather.fetchedAtUtc > 0) {
-    time_t t = currentWeather.fetchedAtUtc;
-    struct tm tmLocal;
-    if (localtime_r(&t, &tmLocal)) {
-      char buf[18];
-      strftime(buf, sizeof(buf), "Updated %H:%M", &tmLocal);
-      footerText = String(buf);
+    WiFi.disconnect();
+    if (strlen(WIFI_PASSWORD) > 0) {
+      WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
     } else {
-      footerText = "Updated";
+      WiFi.begin(WIFI_SSID);
+    }
+
+    unsigned long start = millis();
+    while (WiFi.status() != WL_CONNECTED && millis() - start < 10000) {
+      delay(500);
+      Serial.print(".");
+    }
+    Serial.println();
+
+    if (WiFi.status() == WL_CONNECTED) {
+      Serial.println("✓ Reconnected!");
+      return true;
+    }
+
+    Serial.print("Waiting ");
+    Serial.print(retryDelay / 1000);
+    Serial.println("s before next attempt");
+    delay(retryDelay);
+    retryDelay = 30000;  // 30s for all subsequent retries
+    attempt++;
+  }
+  return true;
+}
+
+void handleTouch() {
+  if (!touchscreen.tirqTouched() || !touchscreen.touched()) return;
+  
+  // Debounce
+  if (millis() - lastTouchTime < TOUCH_DEBOUNCE) return;
+  lastTouchTime = millis();
+
+  TS_Point p = touchscreen.getPoint();
+  x = map(p.x, 200, 3700, 1, SCREEN_WIDTH);
+  y = map(p.y, 240, 3800, 1, SCREEN_HEIGHT);
+  z = p.z;
+
+  //Serial.print("Touch: x="); Serial.print(x);
+  //Serial.print(" y="); Serial.println(y);
+
+  if (x > SCREEN_WIDTH / 2) {
+    // Right half — forward
+    if (currentScreen < 3) {
+      currentScreen++;
+      renderScreen(currentScreen);
     }
   } else {
-    footerText = "Updated";
+    // Left half — back
+    if (currentScreen > 0) {
+      currentScreen--;
+      renderScreen(currentScreen);
+    }
   }
-
-  tft.drawCentreString(footerText, centerX, tft.height() - 16, 2);
-
 }
 
-void updateBlinkIndicator(bool blinkState) {
-  // Draw a small blinking dot in top-right corner
-  int dotX = tft.width() - 15;
-  int dotY = 15;
-  int dotSize = 5;
-  
-  if (blinkState) {
-    tft.fillCircle(dotX, dotY, dotSize, TFT_YELLOW);
+void fetchCurrentWeather() {
+  if (!ensureWiFi()) return;
+
+  Serial.println("Fetching current weather...");
+  CurrentConditions newWeather = weatherAPI->getCurrentWeather();
+
+  if (newWeather.isValid) {
+    currentWeather = newWeather;
+    everFetchedSuccessfully = true;
+    Serial.println("Current weather fetch successful");
   } else {
-    tft.fillCircle(dotX, dotY, dotSize, TFT_BLACK);
+    Serial.println("Current weather fetch failed — keeping existing data");
   }
+
+  renderScreen(currentScreen);
 }
 
-void showErrorScreen() {
-  tft.fillScreen(TFT_BLACK);
-  tft.drawCentreString("Weather Error", centerX, centerY - 20, FONT_SIZE);
-  tft.drawCentreString("Check WiFi Connection", centerX, centerY + 20, FONT_SIZE);
+void fetchDailyForecast() {
+  if (!ensureWiFi()) return;
+
+  Serial.println("Fetching daily forecast...");
+  DailyForecast newDaily = weatherAPI->getDailyForecast();
+
+  if (newDaily.isValid) {
+    dailyForecast = newDaily;
+    Serial.println("Daily forecast fetch successful");
+  } else {
+    Serial.println("Daily forecast fetch failed — keeping existing data");
+  }
+
+  renderScreen(currentScreen);
 }
-
-
 
 void setup() {
   Serial.begin(115200);
@@ -438,44 +263,43 @@ void setup() {
   connectToWiFi();
 
   // Sync time with NTP
-  bool timeOk = syncTime();
+  if (!syncTime()) Serial.println("Continuing without time sync");
 
   // Initialize weather API
   weatherAPI = new WeatherAPI(GPS_LATITUDE, GPS_LONGITUDE);
 
   // Fetch initial weather
-  fetchWeather();
+  fetchCurrentWeather();
+  fetchDailyForecast();
+  lastCurrentUpdate = millis();
+  lastDailyUpdate   = millis();
+  drawClockInAppBar();
 }
 
 void loop() {
-  // Checks if Touchscreen was touched, and prints X, Y and Pressure (Z) info on the TFT display and Serial Monitor
-  if (touchscreen.tirqTouched() && touchscreen.touched()) {
-    // Get Touchscreen points
-    TS_Point p = touchscreen.getPoint();
-    // Calibrate Touchscreen points with map function to the correct width and height
-    x = map(p.x, 200, 3700, 1, SCREEN_WIDTH);
-    y = map(p.y, 240, 3800, 1, SCREEN_HEIGHT);
-    z = p.z;
+  handleTouch();
 
+  if (millis() - lastCurrentUpdate >= CURRENT_UPDATE_INTERVAL) {
+    fetchCurrentWeather();
+    lastCurrentUpdate = millis();
   }
 
-  // Check for weather update (every 5 minutes)
-  if (millis() - lastWeatherUpdate >= WEATHER_UPDATE_INTERVAL) {
-    fetchWeather();
-    lastWeatherUpdate = millis();
+  if (millis() - lastDailyUpdate >= DAILY_UPDATE_INTERVAL) {
+    fetchDailyForecast();
+    lastDailyUpdate = millis();
   }
 
   if (millis() - lastClockTick >= CLOCK_UPDATE_INTERVAL) {
     drawClockInAppBar();
     lastClockTick = millis();
   }
-  
-  // Update blinking indicator
+
   if (millis() - lastBlink >= BLINK_INTERVAL) {
     blinkState = !blinkState;
     updateBlinkIndicator(blinkState);
     lastBlink = millis();
   }
+
   delay(10);
 }
 
